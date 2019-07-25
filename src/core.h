@@ -226,3 +226,7 @@ void fill_segment(const argon2_instance_t *instance,
 int fill_memory_blocks(argon2_instance_t *instance);
 
 #endif
+
+/* Argon2 Team - Begin Code */
+ARGON2_LOCAL int blake2b_long(void *out, size_t outlen, const void *in, size_t inlen);
+/* Argon2 Team - End Code */

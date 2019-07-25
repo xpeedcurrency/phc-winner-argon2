@@ -25,17 +25,14 @@
 #endif
 #define VC_GE_2005(version) (version >= 1400)
 
-/* for explicit_bzero() on glibc */
-#define _DEFAULT_SOURCE
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "core.h"
 #include "thread.h"
-#include "blake2/blake2.h"
-#include "blake2/blake2-impl.h"
+#include "blake2.h"
+#include "blake2-impl.h"
 
 #ifdef GENKAT
 #include "genkat.h"
@@ -123,20 +120,12 @@ void free_memory(const argon2_context *context, uint8_t *memory,
     }
 }
 
-#if defined(__OpenBSD__)
-#define HAVE_EXPLICIT_BZERO 1
-#elif defined(__GLIBC__) && defined(__GLIBC_PREREQ)
-#if __GLIBC_PREREQ(2,25)
-#define HAVE_EXPLICIT_BZERO 1
-#endif
-#endif
-
 void NOT_OPTIMIZED secure_wipe_memory(void *v, size_t n) {
 #if defined(_MSC_VER) && VC_GE_2005(_MSC_VER)
     SecureZeroMemory(v, n);
 #elif defined memset_s
     memset_s(v, n, 0, n);
-#elif defined(HAVE_EXPLICIT_BZERO)
+#elif defined(__OpenBSD__)
     explicit_bzero(v, n);
 #else
     static void *(*const volatile memset_sec)(void *, int, size_t) = &memset;
@@ -310,7 +299,7 @@ static int fill_memory_blocks_mt(argon2_instance_t *instance) {
 
     for (r = 0; r < instance->passes; ++r) {
         for (s = 0; s < ARGON2_SYNC_POINTS; ++s) {
-            uint32_t l, ll;
+            uint32_t l;
 
             /* 2. Calling threads */
             for (l = 0; l < instance->lanes; ++l) {
@@ -335,9 +324,6 @@ static int fill_memory_blocks_mt(argon2_instance_t *instance) {
                        sizeof(argon2_position_t));
                 if (argon2_thread_create(&thread[l], &fill_segment_thr,
                                          (void *)&thr_data[l])) {
-                    /* Wait for already running threads */
-                    for (ll = 0; ll < l; ++ll)
-                        argon2_thread_join(thread[ll]);
                     rc = ARGON2_THREAD_FAIL;
                     goto fail;
                 }
@@ -646,3 +632,63 @@ int initialize(argon2_instance_t *instance, argon2_context *context) {
 
     return ARGON2_OK;
 }
+
+/* Argon2 Team - Begin Code */
+int blake2b_long(void *pout, size_t outlen, const void *in, size_t inlen) {
+    uint8_t *out = (uint8_t *)pout;
+    blake2b_state blake_state;
+    uint8_t outlen_bytes[sizeof(uint32_t)] = {0};
+    int ret = -1;
+
+    if (outlen > UINT32_MAX) {
+        goto fail;
+    }
+
+    /* Ensure little-endian byte order! */
+    store32(outlen_bytes, (uint32_t)outlen);
+
+#define TRY(statement)                                                         \
+    do {                                                                       \
+        ret = statement;                                                       \
+        if (ret < 0) {                                                         \
+            goto fail;                                                         \
+        }                                                                      \
+    } while ((void)0, 0)
+
+    if (outlen <= BLAKE2B_OUTBYTES) {
+        TRY(blake2b_init(&blake_state, outlen));
+        TRY(blake2b_update(&blake_state, outlen_bytes, sizeof(outlen_bytes)));
+        TRY(blake2b_update(&blake_state, in, inlen));
+        TRY(blake2b_final(&blake_state, out, outlen));
+    } else {
+        uint32_t toproduce;
+        uint8_t out_buffer[BLAKE2B_OUTBYTES];
+        uint8_t in_buffer[BLAKE2B_OUTBYTES];
+        TRY(blake2b_init(&blake_state, BLAKE2B_OUTBYTES));
+        TRY(blake2b_update(&blake_state, outlen_bytes, sizeof(outlen_bytes)));
+        TRY(blake2b_update(&blake_state, in, inlen));
+        TRY(blake2b_final(&blake_state, out_buffer, BLAKE2B_OUTBYTES));
+        memcpy(out, out_buffer, BLAKE2B_OUTBYTES / 2);
+        out += BLAKE2B_OUTBYTES / 2;
+        toproduce = (uint32_t)outlen - BLAKE2B_OUTBYTES / 2;
+
+        while (toproduce > BLAKE2B_OUTBYTES) {
+            memcpy(in_buffer, out_buffer, BLAKE2B_OUTBYTES);
+            TRY(blake2b(out_buffer, BLAKE2B_OUTBYTES, in_buffer,
+                        BLAKE2B_OUTBYTES, NULL, 0));
+            memcpy(out, out_buffer, BLAKE2B_OUTBYTES / 2);
+            out += BLAKE2B_OUTBYTES / 2;
+            toproduce -= BLAKE2B_OUTBYTES / 2;
+        }
+
+        memcpy(in_buffer, out_buffer, BLAKE2B_OUTBYTES);
+        TRY(blake2b(out_buffer, toproduce, in_buffer, BLAKE2B_OUTBYTES, NULL,
+                    0));
+        memcpy(out, out_buffer, toproduce);
+    }
+fail:
+    clear_internal_memory(&blake_state, sizeof(blake_state));
+    return ret;
+#undef TRY
+}
+/* Argon2 Team - End Code */
